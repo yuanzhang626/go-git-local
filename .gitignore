@@ -2,3 +2,6 @@
 /.DS_Store
 /.vscode
 *.exe
+*.git/
+*/.claude/
+_examples/storage/go-git-multrepo/output/

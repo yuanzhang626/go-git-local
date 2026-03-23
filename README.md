@@ -32,3 +32,12 @@ git命令操作: git clone --bare http://yuanz001:zy6198803@sit.gitee.work/yuan_
 代码路径: _examples/clone/bare
   ./bare.exe  http://sit.gitee.work/yuan_002/yuanz001/test_004.git ./temp yuanz001 zy6198803
 
+### 多代码仓合并
+添加存储层的事务支持，
+将所有写操作路由到「临时存储（temporal）」，读操作优先读取临时存储（未命中则读基础存储）；
+只有调用 Commit() 时，才将临时存储的内容原子性合并到「基础存储（base）」，实现事务的「提交」语义；
+若放弃事务，直接丢弃临时存储即可实现「回滚」
+
+代码路径: _examples/storage/go-git-multrepo
+
+

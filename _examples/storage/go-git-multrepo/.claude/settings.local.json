@@ -1,0 +1,9 @@
+{
+  "permissions": {
+    "allow": [
+      "Bash(go build:*)",
+      "Bash(./go-git-multrepo.exe)",
+      "Bash(git log:*)"
+    ]
+  }
+}

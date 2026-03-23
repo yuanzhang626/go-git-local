@@ -1,0 +1,112 @@
+package main
+
+import (
+	"context"
+	"fmt"
+	"go-git-multrepo/multirepo"
+	"os"
+
+	"github.com/go-git/go-billy/v6/osfs"
+	"github.com/go-git/go-git/v6/plumbing"
+	"github.com/go-git/go-git/v6/plumbing/cache"
+	"github.com/go-git/go-git/v6/storage"
+	"github.com/go-git/go-git/v6/storage/filesystem"
+)
+
+func main() {
+	// 示例：调用 GitalyMultiRepoMerge 进行多仓库合并
+	ctx := context.Background()
+
+	// 仓库ID列表
+	repoIDs := []string{"test_004"}
+
+	// 准备合并操作（示例：创建一个新的commit对象并更新引用）
+	// 注意：这里需要实际的commit对象和引用，以下仅为示例结构
+	mergeOps := []MergeOp{
+		// 实际操作中需要构造真实的EncodedObject和Reference
+		// 这里展示调用方式
+	}
+
+	// 执行多仓库合并
+	if err := GitalyMultiRepoMerge(ctx, repoIDs, mergeOps); err != nil {
+		fmt.Printf("多仓库合并失败: %v\n", err)
+		os.Exit(1)
+	}
+
+	fmt.Println("多仓库合并成功")
+
+}
+
+// MergeOp 单仓库合并操作
+type MergeOp struct {
+	Object plumbing.EncodedObject
+	Ref    *plumbing.Reference
+}
+
+// GitalyMultiRepoMerge 多仓库合并操作（原子性）
+func GitalyMultiRepoMerge(ctx context.Context, repoIDs []string, mergeOps []MergeOp) error {
+	// 1. 初始化多仓库事务
+	multiTx := multirepo.NewMultiRepoTx()
+
+	// 2. 为每个仓库创建事务存储，并执行合并写操作
+	for _, repoID := range repoIDs {
+		// 获取仓库原存储（如文件系统存储）
+		baseStorer, err := getRepoStorer(repoID)
+		if err != nil {
+			return err
+		}
+		// 将仓库加入事务，获取事务性存储
+		txStorer, err := multiTx.AddRepo(repoID, baseStorer)
+		if err != nil {
+			return err
+		}
+		// 执行该仓库的合并写操作（所有写操作落临时存储）
+		if err := executeMergeOp(ctx, txStorer, mergeOps); err != nil {
+			return err
+		}
+	}
+
+	// 3. 两阶段提交
+	if err := multiTx.Prepare(ctx); err != nil {
+		_ = multiTx.Rollback(ctx)
+		return err
+	}
+	if err := multiTx.Commit(ctx); err != nil {
+		_ = multiTx.Rollback(ctx)
+		return err
+	}
+
+	return nil
+}
+
+// getRepoStorer 获取仓库的持久化存储（示例：文件系统存储）
+func getRepoStorer(repoID string) (storage.Storer, error) {
+	repoPath := fmt.Sprintf("./repos/%s", repoID)
+	fs := osfs.New(repoPath)
+	return filesystem.NewStorage(fs, cache.NewObjectLRUDefault()), nil
+}
+
+// executeMergeOp 执行单仓库的合并写操作（如修改引用、写入对象）
+func executeMergeOp(ctx context.Context, storer storage.Storer, ops []MergeOp) error {
+	// 示例：写入合并后的commit对象、更新HEAD引用等
+	// 所有操作基于txStorer（临时存储），未提交前不会影响正式存储
+	for _, op := range ops {
+		// 写入对象
+		_, err := storer.SetEncodedObject(op.Object)
+		if err != nil {
+			return err
+		}
+		// 更新引用
+		if err := storer.SetReference(op.Ref); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// 替换内存临时存储为文件系统临时存储
+func newTmpStorer(repoID string) storage.Storer {
+	tmpDir, _ := os.MkdirTemp("./", fmt.Sprintf("tmp-repo-tx-%s", repoID))
+	fs := osfs.New(tmpDir)
+	return filesystem.NewStorage(fs, cache.NewObjectLRUDefault())
+}
