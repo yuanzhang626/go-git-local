@@ -43,12 +43,12 @@ type MultiRepoTxStorage struct {
 
 // RepoTxStorage 单仓库的事务存储（复用go-git transactional包）
 type RepoTxStorage struct {
-	repoID       string
-	baseStorer   storage.Storer        // 仓库原存储
-	tmpStorer    storage.Storer        // 临时存储（如memory.NewStorage()）
-	txStorage    transactional.Storage // 基于base+tmp的事务存储
-	fsPath       string                // 文件系统路径，用于持久化
-	fsStorage    storage.Storer        // 文件系统存储，用于持久化
+	repoID     string
+	baseStorer storage.Storer        // 仓库原存储
+	tmpStorer  storage.Storer        // 临时存储（如memory.NewStorage()）
+	txStorage  transactional.Storage // 基于base+tmp的事务存储
+	fsPath     string                // 文件系统路径，用于持久化
+	fsStorage  storage.Storer        // 文件系统存储，用于持久化
 }
 
 // TxContext 事务上下文：管理事务状态、临时存储生命周期
@@ -130,7 +130,7 @@ func validateTmpStorer(s storage.Storer) error {
 		return err
 	}
 	defer iter.Close()
-	// 此处可扩展：如检查引用是否与基础存储冲突、对象完整性等
+	// todo 此处可扩展：如检查引用是否与基础存储冲突、对象完整性等
 	return iter.ForEach(func(ref *plumbing.Reference) error { return nil })
 }
 
@@ -237,6 +237,7 @@ func (m *MultiRepoTxStorage) Commit(ctx context.Context) error {
 
 // Rollback 回滚所有仓库的临时操作
 func (m *MultiRepoTxStorage) Rollback(ctx context.Context) error {
+	//todo 像这类已经提交的，也需要回滚
 	if m.txContext.status == TxCommitted {
 		return fmt.Errorf("transaction already committed, cannot rollback")
 	}

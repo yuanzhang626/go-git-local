@@ -32,6 +32,19 @@ git命令操作: git clone --bare http://yuanz001:zy6198803@sit.gitee.work/yuan_
 代码路径: _examples/clone/bare
   ./bare.exe  http://sit.gitee.work/yuan_002/yuanz001/test_004.git ./temp yuanz001 zy6198803
 
+模拟服务端操作 
+- 服务端: 初始化一个仓库
+- 客户端: 构造出两个分支 master|dev，并推送到服务端
+- 服务端: 进行合并操作
+
+ 服务端并不是通过 git init --bare 初始化一个裸库；
+  a.通过客户端，创建一个普通仓库(添加README.md文件，并创建commit)；
+  b.将临时仓库推送到裸仓库
+ 客户端，克隆服务端裸仓，其地址直接写文件路径(而不是url地址)  -- todo 后续改为，直接在服务端工作？？？
+ 客户端，进行合并操作
+
+
+
 ### 多代码仓合并
 添加存储层的事务支持，
 将所有写操作路由到「临时存储（temporal）」，读操作优先读取临时存储（未命中则读基础存储）；
