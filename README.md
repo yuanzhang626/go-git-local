@@ -43,7 +43,14 @@ git命令操作: git clone --bare http://yuanz001:zy6198803@sit.gitee.work/yuan_
  客户端，克隆服务端裸仓，其地址直接写文件路径(而不是url地址)  -- todo 后续改为，直接在服务端工作？？？
  客户端，进行合并操作
 
-
+代码路径: _examples/clone/bare_merge_two
+优化1: (模仿gitaly场景)全部在服务端进行操作
+    1.生成裸仓      已完成
+    2.创建分支      新增文件
+    3.提交文件      提交test.txt文件
+    4.合并分支      
+    
+优化2：模拟gitaly，服务端使用git命令来操作
 
 ### 多代码仓合并
 添加存储层的事务支持，

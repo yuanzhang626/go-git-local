@@ -6,3 +6,4 @@
 */.claude/
 _examples/storage/go-git-multrepo/output/
 _examples/clone/bare_merge/client-repo
+_examples/clone/bare_merge_two/server-repo.git
