@@ -7,3 +7,4 @@
 _examples/storage/go-git-multrepo/output/
 _examples/clone/bare_merge/client-repo
 _examples/clone/bare_merge_two/server-repo.git
+_examples/storage/go-git-multrepo-two/repo_temp

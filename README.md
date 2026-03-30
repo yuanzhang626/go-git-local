@@ -50,7 +50,38 @@ git命令操作: git clone --bare http://yuanz001:zy6198803@sit.gitee.work/yuan_
     3.提交文件      提交test.txt文件
     4.合并分支      
     
-优化2：模拟gitaly，服务端使用git命令来操作
+优化2：（模拟gitaly执行git命令），全部在服务端进行操作
+    1.创建分支 (git branch 分支名  or git branch 新分支 来源分支)
+    2.提交文件 
+        a.直接生成 commit。大概包括：创建 / 更新一个文件；创建树对象；创建 commit； 将 commit 指向分支
+```shell
+- 更新一个文件；创建树对象(裸仓直接写入)
+echo "内容" | git hash-object -w --stdin -o file.txt
+- 创建树对象（目录结构）
+git mktree <<EOF
+100644 blob a1e8324fe0b54d325d4f89b287a222662f0966fc    file.txt
+EOF
+- 创建 commit（最关键）
+git commit-tree 树SHA -p 父commitSHA -m "提交信息"
+- 将 commit 指向分支
+git update-ref refs/heads/main 新commitSHA
+```
+        b.创建一个临时工作区操作
+```shell
+- 临时目录
+mkdir /tmp/tmp-work
+cd /tmp/tmp-work
+- 克隆裸仓（只读临时用）
+git clone /home/git/repo/xxx.git .
+- 正常操作文件
+echo "test" >> test.txt
+git add .
+git commit -m "服务端自动提交"
+- 推回裸仓
+git push origin main
+```
+    3.合并分支
+
 
 ### 多代码仓合并
 添加存储层的事务支持，
@@ -61,3 +92,15 @@ git命令操作: git clone --bare http://yuanz001:zy6198803@sit.gitee.work/yuan_
 代码路径: _examples/storage/go-git-multrepo
 
 
+多个仓库: 
+
+
+优化1：全部在服务端进行操作
+代码路径: _examples/storage/go-git-multrepo-two
+前置条件： 即合并的准备工作
+    1.生成裸仓  
+    2.创建分支  3.提交文件   --- 参考裸仓库-优化2，创建前置操作
+  
+两个代码仓库：仓库A，仓库B
+  1.合并分支
+  2.
