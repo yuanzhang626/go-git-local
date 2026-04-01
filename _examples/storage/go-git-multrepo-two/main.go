@@ -282,7 +282,15 @@ func createBlobInBareRepo(repo *git.Repository, filename string, content []byte)
 // 在裸仓，将多个仓库进行合并
 func mergeBranch(mergeInfos []MergeInfo) error {
 	ctx := context.Background()
-	tx := multirepo.NewMultiRepoTx()
+	// 使用带 Redis 锁的事务，默认连接 localhost:6379
+	tx := multirepo.NewMultiRepoTxWithRedis("localhost:6379", "")
+
+	// 确保在函数退出时关闭 Redis 连接
+	defer func() {
+		if closer, ok := tx.(interface{ Close() error }); ok {
+			_ = closer.Close()
+		}
+	}()
 
 	// 遍历每个仓库，执行合并操作
 	for _, mergeInfo := range mergeInfos {
@@ -313,8 +321,8 @@ func mergeBranch(mergeInfos []MergeInfo) error {
 }
 
 func mergeInTx(tx multirepo.MultiRepoTx, mergeInfo MergeInfo) error {
-	// 获取该仓库的事务性存储（写操作落临时存储）
-	txStorer, err := tx.AddRepo(mergeInfo.RepoName, mergeInfo.Repo.Storer, mergeInfo.RepoPath)
+	// 获取该仓库的事务性存储（写操作落临时存储），并指定需要备份的 targetBranch
+	txStorer, err := tx.AddRepoWithBranch(mergeInfo.RepoName, mergeInfo.Repo.Storer, mergeInfo.RepoPath, mergeInfo.TargetBranch)
 	if err != nil {
 		return fmt.Errorf("add repo %s to tx failed: %w", mergeInfo.RepoName, err)
 	}
@@ -421,7 +429,7 @@ func mergeInTx(tx multirepo.MultiRepoTx, mergeInfo MergeInfo) error {
 		if err != nil {
 			return fmt.Errorf("update main reference failed: %w", err)
 		}
-		fmt.Printf("Repo %s non-fast-forward merge dev to main (temp storage) success\n", mergeInfo.RepoName)
+		fmt.Printf("Repo %s non-fast-forward merge %s to %s (temp storage) success\n", mergeInfo.RepoName, mergeInfo.SourceBranch, mergeInfo.TargetBranch)
 	}
 
 	return nil

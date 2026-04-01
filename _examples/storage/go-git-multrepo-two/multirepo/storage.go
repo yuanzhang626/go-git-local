@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"time"
 
 	"github.com/go-git/go-billy/v6/osfs"
 	"github.com/go-git/go-git/v6/plumbing"
@@ -12,6 +13,7 @@ import (
 	"github.com/go-git/go-git/v6/storage/filesystem"
 	"github.com/go-git/go-git/v6/storage/memory"
 	"github.com/go-git/go-git/v6/storage/transactional"
+	"github.com/redis/go-redis/v9"
 )
 
 /*
@@ -27,6 +29,8 @@ MultiRepoTxStorage（顶层）
 type MultiRepoTx interface {
 	// AddRepo 将仓库加入事务，返回该仓库的事务性存储（写操作落临时存储）
 	AddRepo(repoID string, baseStorer storage.Storer, fsPath string) (storage.Storer, error)
+	// AddRepoWithBranch 将仓库加入事务，并指定需要备份的分支
+	AddRepoWithBranch(repoID string, baseStorer storage.Storer, fsPath string, targetBranch string) (storage.Storer, error)
 	// Prepare 两阶段提交-准备阶段：验证所有仓库的临时操作可行性
 	Prepare(ctx context.Context) error
 	// Commit 两阶段提交-提交阶段：所有仓库的临时操作刷入正式存储
@@ -39,16 +43,19 @@ type MultiRepoTx interface {
 type MultiRepoTxStorage struct {
 	txContext  *TxContext                // 全局事务上下文
 	repoStores map[string]*RepoTxStorage // 参与事务的仓库存储映射
+	redisClient *redis.Client             // Redis 客户端，用于分布式锁
 }
 
 // RepoTxStorage 单仓库的事务存储（复用go-git transactional包）
 type RepoTxStorage struct {
-	repoID     string
-	baseStorer storage.Storer        // 仓库原存储
-	tmpStorer  storage.Storer        // 临时存储（如memory.NewStorage()）
-	txStorage  transactional.Storage // 基于base+tmp的事务存储
-	fsPath     string                // 文件系统路径，用于持久化
-	fsStorage  storage.Storer        // 文件系统存储，用于持久化
+	repoID       string
+	baseStorer   storage.Storer        // 仓库原存储
+	tmpStorer    storage.Storer        // 临时存储（如memory.NewStorage()）
+	txStorage    transactional.Storage // 基于base+tmp的事务存储
+	fsPath       string                // 文件系统路径，用于持久化
+	fsStorage    storage.Storer        // 文件系统存储，用于持久化
+	backupRefs   map[string]string     // 备份的引用（ref name -> hash）
+	targetBranch string                // 需要备份的目标分支
 }
 
 // TxContext 事务上下文：管理事务状态、临时存储生命周期
@@ -67,9 +74,22 @@ const (
 
 // NewMultiRepoTx 创建新的多仓库事务
 func NewMultiRepoTx() MultiRepoTx {
+	return NewMultiRepoTxWithRedis("localhost:6379", "")
+}
+
+// NewMultiRepoTxWithRedis 创建新的多仓库事务，并指定 Redis 连接
+func NewMultiRepoTxWithRedis(redisAddr, redisPassword string) MultiRepoTx {
+	// 创建 Redis 客户端
+	rdb := redis.NewClient(&redis.Options{
+		Addr:     redisAddr,
+		Password: redisPassword,
+		DB:       0, // 使用默认数据库
+	})
+
 	return &MultiRepoTxStorage{
 		txContext:  &TxContext{status: TxInit},
 		repoStores: make(map[string]*RepoTxStorage),
+		redisClient: rdb,
 	}
 }
 
@@ -89,16 +109,113 @@ func (m *MultiRepoTxStorage) AddRepo(repoID string, baseStorer storage.Storer, f
 	fsStorage := filesystem.NewStorage(fs, nil)
 
 	repoTxStore := &RepoTxStorage{
-		repoID:     repoID,
-		baseStorer: baseStorer,
-		tmpStorer:  tmpStorer,
-		txStorage:  txStorage,
-		fsPath:     fsPath,
-		fsStorage:  fsStorage,
+		repoID:       repoID,
+		baseStorer:   baseStorer,
+		tmpStorer:    tmpStorer,
+		txStorage:    txStorage,
+		fsPath:       fsPath,
+		fsStorage:    fsStorage,
+		backupRefs:   make(map[string]string),
+		targetBranch: "", // 默认不备份任何分支
 	}
 	m.repoStores[repoID] = repoTxStore
 
 	return repoTxStore.txStorage, nil
+}
+
+// AddRepoWithBranch 将仓库加入事务，并指定需要备份的分支
+func (m *MultiRepoTxStorage) AddRepoWithBranch(repoID string, baseStorer storage.Storer, fsPath string, targetBranch string) (storage.Storer, error) {
+	if m.txContext.status != TxInit {
+		return nil, fmt.Errorf("transaction status not init, cannot add repo")
+	}
+
+	// 为仓库创建临时存储（内存存储，轻量且易回滚）
+	tmpStorer := memory.NewStorage()
+	// 复用go-git transactional包创建单仓库事务存储
+	txStorage := transactional.NewStorage(baseStorer, tmpStorer)
+
+	// 创建文件系统存储用于持久化
+	fs := osfs.New(fsPath)
+	fsStorage := filesystem.NewStorage(fs, nil)
+
+	repoTxStore := &RepoTxStorage{
+		repoID:       repoID,
+		baseStorer:   baseStorer,
+		tmpStorer:    tmpStorer,
+		txStorage:    txStorage,
+		fsPath:       fsPath,
+		fsStorage:    fsStorage,
+		backupRefs:   make(map[string]string),
+		targetBranch: targetBranch,
+	}
+	m.repoStores[repoID] = repoTxStore
+
+	return repoTxStore.txStorage, nil
+}
+
+// acquireRepoLock 获取仓库的分布式锁
+func (m *MultiRepoTxStorage) acquireRepoLock(ctx context.Context, repoID string) error {
+	// 锁的key：repo_lock:{repoID}
+	lockKey := fmt.Sprintf("repo_lock:%s", repoID)
+
+	// 尝试获取锁，锁的过期时间为30秒
+	success, err := m.redisClient.SetNX(ctx, lockKey, "locked", 30*time.Second).Result()
+	if err != nil {
+		return fmt.Errorf("failed to acquire lock for repo %s: %w", repoID, err)
+	}
+
+	if !success {
+		return fmt.Errorf("repo %s is currently being processed by another process", repoID)
+	}
+
+	fmt.Printf("  Acquired lock for repo %s\n", repoID)
+	return nil
+}
+
+// releaseRepoLock 释放仓库的分布式锁
+func (m *MultiRepoTxStorage) releaseRepoLock(ctx context.Context, repoID string) {
+	lockKey := fmt.Sprintf("repo_lock:%s", repoID)
+
+	// 释放锁
+	err := m.redisClient.Del(ctx, lockKey).Err()
+	if err != nil {
+		fmt.Printf("Warning: failed to release lock for repo %s: %v\n", repoID, err)
+	} else {
+		fmt.Printf("  Released lock for repo %s\n", repoID)
+	}
+}
+
+// acquireAllRepoLocks 获取所有仓库的分布式锁
+func (m *MultiRepoTxStorage) acquireAllRepoLocks(ctx context.Context) error {
+	// 按顺序获取所有仓库的锁
+	for repoID := range m.repoStores {
+		if err := m.acquireRepoLock(ctx, repoID); err != nil {
+			// 获取锁失败，释放之前获取的所有锁
+			for acquiredRepoID := range m.repoStores {
+				if acquiredRepoID == repoID {
+					break // 只释放之前成功获取的锁
+				}
+				m.releaseRepoLock(ctx, acquiredRepoID)
+			}
+			return err
+		}
+	}
+	return nil
+}
+
+// releaseAllRepoLocks 释放所有仓库的分布式锁
+func (m *MultiRepoTxStorage) releaseAllRepoLocks(ctx context.Context) {
+	for repoID := range m.repoStores {
+		m.releaseRepoLock(ctx, repoID)
+	}
+}
+
+// Close 关闭事务，释放资源
+func (m *MultiRepoTxStorage) Close() error {
+	if m.redisClient != nil {
+		return m.redisClient.Close()
+	}
+	return nil
 }
 
 func (m *MultiRepoTxStorage) Prepare(ctx context.Context) error {
@@ -206,10 +323,105 @@ func (r *RepoTxStorage) persistToFilesystem() error {
 	return nil
 }
 
+// createBackup 创建仓库的引用备份，用于支持已提交事务的回滚
+func (r *RepoTxStorage) createBackup() error {
+	if len(r.backupRefs) > 0 {
+		return nil // 备份已存在
+	}
+
+	// 如果没有指定 targetBranch，则不备份
+	if r.targetBranch == "" {
+		fmt.Printf("  No target branch specified for repo %s, skipping backup\n", r.repoID)
+		return nil
+	}
+
+	// 只备份 targetBranch
+	targetRefName := plumbing.NewBranchReferenceName(r.targetBranch)
+	targetRef, err := r.baseStorer.Reference(targetRefName)
+	if err != nil {
+		return fmt.Errorf("get target branch %s failed: %w", r.targetBranch, err)
+	}
+
+	// 创建备份引用名称，格式：refs/backup/{branch_name}_{commit_id}
+	// 例如：refs/backup/main_abc123def
+	backupRefName := fmt.Sprintf("refs/backup/%s_%s", r.targetBranch, targetRef.Hash())
+	_ = plumbing.NewHashReference(plumbing.ReferenceName(backupRefName), targetRef.Hash())
+
+	// 存储备份信息：原始引用名 -> 备份引用名
+	r.backupRefs[string(targetRefName)] = backupRefName
+
+	fmt.Printf("  Backed up target branch %s -> %s\n", targetRefName, backupRefName)
+	fmt.Printf("  Created 1 reference backup for repo %s\n", r.repoID)
+
+	return nil
+}
+
+// restoreFromBackup 从备份引用恢复仓库
+func (r *RepoTxStorage) restoreFromBackup() error {
+	if len(r.backupRefs) == 0 {
+		return fmt.Errorf("no backup references available for repo %s", r.repoID)
+	}
+
+	// 遍历所有备份引用，恢复到原始引用
+	restoreCount := 0
+	for originalRefName, backupRefName := range r.backupRefs {
+		// 从存储中获取备份引用
+		backupRef, err := r.fsStorage.Reference(plumbing.ReferenceName(backupRefName))
+		if err != nil {
+			fmt.Printf("Warning: backup reference %s not found: %v\n", backupRefName, err)
+			continue
+		}
+
+		// 创建原始引用
+		originalRef := plumbing.NewHashReference(plumbing.ReferenceName(originalRefName), backupRef.Hash())
+
+		// 设置原始引用
+		if err := r.fsStorage.SetReference(originalRef); err != nil {
+			fmt.Printf("Warning: failed to restore reference %s: %v\n", originalRefName, err)
+			continue
+		}
+
+		// 删除备份引用
+		_ = r.fsStorage.RemoveReference(plumbing.ReferenceName(backupRefName))
+
+		restoreCount++
+		fmt.Printf("  Restored %s from %s\n", originalRefName, backupRefName)
+	}
+
+	if restoreCount > 0 {
+		fmt.Printf("  Successfully restored %d references for repo %s\n", restoreCount, r.repoID)
+	}
+
+	// 清空备份映射
+	r.backupRefs = make(map[string]string)
+	return nil
+}
+
 // Commit 原子提交所有仓库的临时操作
 func (m *MultiRepoTxStorage) Commit(ctx context.Context) error {
 	if m.txContext.status != TxPrepared {
 		return fmt.Errorf("transaction not prepared, cannot commit")
+	}
+
+	// 获取所有仓库的分布式锁
+	if err := m.acquireAllRepoLocks(ctx); err != nil {
+		return fmt.Errorf("failed to acquire repo locks: %w", err)
+	}
+
+	// 确保在函数退出时释放锁
+	defer m.releaseAllRepoLocks(ctx)
+
+	// 首先为所有仓库创建引用备份
+	for repoID, repoStore := range m.repoStores {
+		select {
+		case <-ctx.Done():
+			_ = m.Rollback(ctx) // 备份中断则回滚
+			return ctx.Err()
+		default:
+			if err := repoStore.createBackup(); err != nil {
+				return fmt.Errorf("repo %s create backup failed: %w", repoID, err)
+			}
+		}
 	}
 
 	// 批量提交所有仓库的事务（复用go-git transactional的Commit逻辑）
@@ -237,19 +449,43 @@ func (m *MultiRepoTxStorage) Commit(ctx context.Context) error {
 
 // Rollback 回滚所有仓库的临时操作
 func (m *MultiRepoTxStorage) Rollback(ctx context.Context) error {
-	//todo 像这类已经提交的，也需要回滚
+	// 如果是已提交状态，需要获取锁才能回滚
 	if m.txContext.status == TxCommitted {
-		return fmt.Errorf("transaction already committed, cannot rollback")
+		// 获取所有仓库的分布式锁
+		if err := m.acquireAllRepoLocks(ctx); err != nil {
+			return fmt.Errorf("failed to acquire repo locks for rollback: %w", err)
+		}
+
+		// 确保在函数退出时释放锁
+		defer m.releaseAllRepoLocks(ctx)
 	}
 
-	// 清空所有仓库的临时存储
-	for _, repoStore := range m.repoStores {
-		select {
-		case <-ctx.Done():
-			return ctx.Err()
-		default:
-			// 重置临时存储（以memory为例，直接重新初始化）
-			repoStore.tmpStorer = memory.NewStorage()
+	// 处理已提交事务的回滚（从备份恢复）
+	if m.txContext.status == TxCommitted {
+		// 从备份恢复所有仓库
+		for repoID, repoStore := range m.repoStores {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+				if err := repoStore.restoreFromBackup(); err != nil {
+					return fmt.Errorf("repo %s restore from backup failed: %w", repoID, err)
+				}
+			}
+		}
+	} else {
+		// 处理未提交事务的回滚（清空临时存储）
+		for _, repoStore := range m.repoStores {
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			default:
+				// 重置临时存储（以memory为例，直接重新初始化）
+				repoStore.tmpStorer = memory.NewStorage()
+
+				// 清空备份映射
+				repoStore.backupRefs = make(map[string]string)
+			}
 		}
 	}
 
