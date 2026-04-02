@@ -153,8 +153,8 @@ func (m *MultiRepoTxStorage) AddRepoWithBranch(repoID string, baseStorer storage
 	return repoTxStore.txStorage, nil
 }
 
-// acquireRepoLock 获取仓库的分布式锁
-func (m *MultiRepoTxStorage) acquireRepoLock(ctx context.Context, repoID string) error {
+// AcquireRepoLock 获取仓库的分布式锁
+func (m *MultiRepoTxStorage) AcquireRepoLock(ctx context.Context, repoID string) error {
 	// 锁的key：repo_lock:{repoID}
 	lockKey := fmt.Sprintf("repo_lock:%s", repoID)
 
@@ -172,8 +172,8 @@ func (m *MultiRepoTxStorage) acquireRepoLock(ctx context.Context, repoID string)
 	return nil
 }
 
-// releaseRepoLock 释放仓库的分布式锁
-func (m *MultiRepoTxStorage) releaseRepoLock(ctx context.Context, repoID string) {
+// ReleaseRepoLock 释放仓库的分布式锁
+func (m *MultiRepoTxStorage) ReleaseRepoLock(ctx context.Context, repoID string) {
 	lockKey := fmt.Sprintf("repo_lock:%s", repoID)
 
 	// 释放锁
@@ -189,13 +189,13 @@ func (m *MultiRepoTxStorage) releaseRepoLock(ctx context.Context, repoID string)
 func (m *MultiRepoTxStorage) acquireAllRepoLocks(ctx context.Context) error {
 	// 按顺序获取所有仓库的锁
 	for repoID := range m.repoStores {
-		if err := m.acquireRepoLock(ctx, repoID); err != nil {
+		if err := m.AcquireRepoLock(ctx, repoID); err != nil {
 			// 获取锁失败，释放之前获取的所有锁
 			for acquiredRepoID := range m.repoStores {
 				if acquiredRepoID == repoID {
 					break // 只释放之前成功获取的锁
 				}
-				m.releaseRepoLock(ctx, acquiredRepoID)
+				m.ReleaseRepoLock(ctx, acquiredRepoID)
 			}
 			return err
 		}
@@ -203,10 +203,10 @@ func (m *MultiRepoTxStorage) acquireAllRepoLocks(ctx context.Context) error {
 	return nil
 }
 
-// releaseAllRepoLocks 释放所有仓库的分布式锁
-func (m *MultiRepoTxStorage) releaseAllRepoLocks(ctx context.Context) {
+// ReleaseAllRepoLocks 释放所有仓库的分布式锁
+func (m *MultiRepoTxStorage) ReleaseAllRepoLocks(ctx context.Context) {
 	for repoID := range m.repoStores {
-		m.releaseRepoLock(ctx, repoID)
+		m.ReleaseRepoLock(ctx, repoID)
 	}
 }
 
@@ -409,7 +409,7 @@ func (m *MultiRepoTxStorage) Commit(ctx context.Context) error {
 	}
 
 	// 确保在函数退出时释放锁
-	defer m.releaseAllRepoLocks(ctx)
+	defer m.ReleaseAllRepoLocks(ctx)
 
 	// 首先为所有仓库创建引用备份
 	for repoID, repoStore := range m.repoStores {
@@ -457,7 +457,7 @@ func (m *MultiRepoTxStorage) Rollback(ctx context.Context) error {
 		}
 
 		// 确保在函数退出时释放锁
-		defer m.releaseAllRepoLocks(ctx)
+		defer m.ReleaseAllRepoLocks(ctx)
 	}
 
 	// 处理已提交事务的回滚（从备份恢复）
