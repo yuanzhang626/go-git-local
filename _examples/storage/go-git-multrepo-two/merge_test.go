@@ -14,6 +14,8 @@ import (
 	"go-git-multrepo-two/multirepo"
 )
 
+//运行测试代码：go test -v merge_test.go  main.go  test_utils.go
+
 // TestMergeBranch 测试 mergeBranch 函数（不使用Redis）
 func TestMergeBranch(t *testing.T) {
 	// 创建临时目录用于测试
@@ -25,25 +27,25 @@ func TestMergeBranch(t *testing.T) {
 
 	// 测试用例
 	tests := []struct {
-		name           string
-		repoCount      int
-		expectError    bool
-		errorContains  string
+		name          string
+		repoCount     int
+		expectError   bool
+		errorContains string
 	}{
 		{
-			name:          "正常合并两个仓库",
-			repoCount:     2,
-			expectError:   false,
+			name:        "正常合并两个仓库",
+			repoCount:   2,
+			expectError: false,
 		},
 		{
-			name:          "合并单个仓库",
-			repoCount:     1,
-			expectError:   false,
+			name:        "合并单个仓库",
+			repoCount:   1,
+			expectError: false,
 		},
 		{
-			name:          "合并多个仓库",
-			repoCount:     3,
-			expectError:   false,
+			name:        "合并多个仓库",
+			repoCount:   3,
+			expectError: false,
 		},
 	}
 
@@ -161,6 +163,7 @@ func mergeBranchWithSameRepo(mergeInfos []MergeInfo) error {
 
 	return nil
 }
+
 // mergeBranchWithoutRedis 不使用Redis的合并操作版本（仅用于测试）
 func mergeBranchWithoutRedis(mergeInfos []MergeInfo) error {
 	ctx := context.Background()
@@ -267,8 +270,8 @@ func TestMergeBranchConcurrent(t *testing.T) {
 
 // TestMergeBranchRollback 测试回滚功能
 func TestMergeBranchRollback(t *testing.T) {
-	// 跳过需要Redis的测试，如果没有Redis服务
-	t.Skip("Skipping rollback test - requires Redis server")
+	//// 跳过需要Redis的测试，如果没有Redis服务
+	//t.Skip("Skipping rollback test - requires Redis server")
 
 	tempDir, err := os.MkdirTemp("", "git-merge-rollback-test")
 	if err != nil {
